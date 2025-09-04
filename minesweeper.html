@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Classic Minesweeper</title>
+<style>
+  body { margin:0; font-family: Arial, sans-serif; background:#2c3e50; display:flex; justify-content:center; align-items:flex-start; height:100vh; }
+  #gameWrapper { display:flex; flex-direction:column; align-items:center; margin-top:20px; }
+  #topBar { display:flex; justify-content: space-between; width: 100%; color: #ecf0f1; font-size: 18px; margin-bottom:10px; padding: 0 10px; box-sizing: border-box; }
+  #difficulty { display:flex; gap:10px; }
+  #timerSafe { display:flex; gap:15px; align-items:center; }
+  #gameArea { display:flex; }
+  #leftPanel { color:#ecf0f1; margin: 10px; display:flex; flex-direction: column; gap:5px; width:180px; }
+  #boardContainer { display:flex; justify-content:center; align-items:center; }
+  #board { display:grid; gap:2px; background:#34495e; }
+  .cell { width:25px; height:25px; background:#bdc3c7; display:flex; justify-content:center; align-items:center; font-weight:bold; font-size:14px; user-select:none; cursor:pointer; }
+  .cell.revealed { background:#ecf0f1; cursor:default; }
+  .cell.mine { background:#e74c3c; }
+  #rightPanel { color:#ecf0f1; margin:10px; display:flex; flex-direction: column; gap:6px; width:240px; }
+  #rightPanel .row { display:flex; justify-content: space-between; }
+  #rightPanel .label { opacity:0.85; }
+</style>
+</head>
+<body>
+
+<div id="gameWrapper">
+  <div id="topBar">
+    <div id="difficulty">
+      Select Difficulty: 
+      <button onclick="startGame('easy')">Easy</button>
+      <button onclick="startGame('intermediate')">Intermediate</button>
+      <button onclick="startGame('hard')">Hard</button>
+    </div>
+    <div id="timerSafe">
+      <span id="timer">Time: 0s</span>
+      <label><input type="checkbox" id="safeMode"> Safe Mode</label>
+    </div>
+  </div>
+
+  <div id="gameArea">
+    <div id="leftPanel">
+      <div id="mineCount">Mines: 0</div>
+      <div id="tilesUncovered">Tiles Uncovered: 0</div>
+      <div id="flagsPlaced">Flags Placed: 0</div>
+    </div>
+
+    <div id="boardContainer">
+      <div id="board"></div>
+    </div>
+
+    <div id="rightPanel">
+      <div class="label">Difficulty Stats:</div>
+
+      <div class="row">
+        <div>Easy Wins: <span id="easyCount">0</span></div>
+        <div>Fastest: <span id="easyFast">--</span>s</div>
+      </div>
+      <div class="row">
+        <div>Intermediate Wins: <span id="interCount">0</span></div>
+        <div>Fastest: <span id="interFast">--</span>s</div>
+      </div>
+      <div class="row">
+        <div>Hard Wins: <span id="hardCount">0</span></div>
+        <div>Fastest: <span id="hardFast">--</span>s</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener("contextmenu", e => e.preventDefault());
+
+// DOM refs
+const boardDiv = document.getElementById("board");
+const mineCountDiv = document.getElementById("mineCount");
+const tilesUncoveredDiv = document.getElementById("tilesUncovered");
+const flagsPlacedDiv = document.getElementById("flagsPlaced");
+const timerDiv = document.getElementById("timer");
+const safeModeCheckbox = document.getElementById("safeMode");
+
+const easyCountSpan  = document.getElementById("easyCount");
+const interCountSpan = document.getElementById("interCount");
+const hardCountSpan  = document.getElementById("hardCount");
+
+const easyFastSpan  = document.getElementById("easyFast");
+const interFastSpan = document.getElementById("interFast");
+const hardFastSpan  = document.getElementById("hardFast");
+
+// Game state
+let cells = [], rows, cols, minesCount, gameOver = false;
+let timer = 0, timerInterval = null;
+let firstClick = true;
+let currentDifficulty = 'easy';
+
+// ---- Persistence: wins + fastest times (with legacy migration) ----
+const STORAGE_KEY_NEW = 'minesweeperGlobalData';
+const STORAGE_KEY_OLD = 'minesweeperGlobalCounts';
+
+// Load new format or migrate from old
+let globalData = JSON.parse(localStorage.getItem(STORAGE_KEY_NEW));
+if (!globalData) {
+  // Try legacy
+  const legacy = JSON.parse(localStorage.getItem(STORAGE_KEY_OLD));
+  if (legacy) {
+    globalData = {
+      easy: { wins: legacy.easy || 0,         fastest: null },
+      intermediate: { wins: legacy.intermediate || 0, fastest: null },
+      hard: { wins: legacy.hard || 0,         fastest: null }
+    };
+  } else {
+    globalData = {
+      easy: { wins: 0, fastest: null },
+      intermediate: { wins: 0, fastest: null },
+      hard: { wins: 0, fastest: null }
+    };
+  }
+  localStorage.setItem(STORAGE_KEY_NEW, JSON.stringify(globalData));
+}
+updateGlobalDisplay();
+
+// ---- Game setup ----
+function startGame(difficulty) {
+  currentDifficulty = difficulty;
+  boardDiv.innerHTML = "";
+  cells = [];
+  gameOver = false;
+  firstClick = true;
+
+  // reset timer
+  stopTimer();
+  timer = 0;
+  timerDiv.textContent = "Time: 0s";
+
+  if (difficulty === 'easy')         { rows = 10; cols = 10; minesCount = 10; }
+  else if (difficulty === 'intermediate') { rows = 16; cols = 16; minesCount = 40; }
+  else if (difficulty === 'hard')    { rows = 25; cols = 25; minesCount = 99; }
+
+  boardDiv.style.gridTemplateColumns = `repeat(${cols},25px)`;
+  boardDiv.style.gridTemplateRows    = `repeat(${rows},25px)`;
+
+  mineCountDiv.textContent = "Mines: " + minesCount;
+
+  for (let r = 0; r < rows; r++) {
+    cells[r] = [];
+    for (let c = 0; c < cols; c++) {
+      const cell = document.createElement("div");
+      cell.classList.add("cell");
+      boardDiv.appendChild(cell);
+      cells[r][c] = { element: cell, mine: false, revealed: false, count: 0 };
+
+      cell.addEventListener("click", () => handleClick(r, c));
+      cell.addEventListener("contextmenu", () => toggleFlag(r, c));
+    }
+  }
+
+  updateStats();
+}
+
+// First-click patch + bomb placement
+function handleClick(r, c) {
+  if (gameOver) return;
+  if (firstClick) {
+    placeMinesExcludingPatch(r, c);
+    calculateNumbers();
+    revealCell(r, c); // flood-fill will reveal around the patch
+    firstClick = false;
+    startTimer();
+  } else {
+    revealCell(r, c);
+  }
+}
+
+function placeMinesExcludingPatch(r0, c0) {
+  let safePatch = [];
+  const neighbors = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
+  safePatch.push(r0 + "_" + c0);
+  neighbors.forEach(([dr, dc]) => {
+    const nr = r0 + dr, nc = c0 + dc;
+    if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) safePatch.push(nr + "_" + nc);
+  });
+
+  let placed = 0;
+  while (placed < minesCount) {
+    const r = Math.floor(Math.random() * rows);
+    const c = Math.floor(Math.random() * cols);
+    const key = r + "_" + c;
+    if (cells[r][c].mine || safePatch.includes(key)) continue;
+    cells[r][c].mine = true;
+    placed++;
+  }
+}
+
+function calculateNumbers() {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (cells[r][c].mine) continue;
+      let count = 0;
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && cells[nr][nc].mine) count++;
+        }
+      }
+      cells[r][c].count = count;
+    }
+  }
+}
+
+function revealCell(r, c) {
+  const cell = cells[r][c];
+  if (cell.revealed || cell.element.textContent === "🚩") return;
+
+  if (cell.mine) {
+    if (safeModeCheckbox.checked) {
+      cell.revealed = true;
+      cell.element.classList.add("mine", "revealed");
+      cell.element.textContent = "💣";
+      updateStats();
+      return;
+    } else {
+      cell.revealed = true;
+      cell.element.classList.add("mine", "revealed");
+      cell.element.textContent = "💣";
+      revealAllMines();
+      gameOver = true;
+      stopTimer();                    // <- pause timer on loss
+      setTimeout(() => alert("Game Over!"), 50);
+      return;
+    }
+  }
+
+  cell.revealed = true;
+  cell.element.classList.add("revealed");
+
+  if (cell.count > 0) {
+    cell.element.textContent = cell.count;
+  } else {
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) revealCell(nr, nc);
+      }
+    }
+  }
+
+  updateStats();
+  checkWin();
+}
+
+function toggleFlag(r, c) {
+  if (gameOver) return;
+  const cell = cells[r][c];
+  if (cell.revealed) return;
+  cell.element.textContent = (cell.element.textContent === "🚩") ? "" : "🚩";
+  updateStats();
+}
+
+function revealAllMines() {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cell = cells[r][c];
+      if (cell.mine) {
+        cell.revealed = true;
+        cell.element.classList.add("revealed", "mine");
+        cell.element.textContent = "💣";
+      }
+    }
+  }
+}
+
+function updateStats() {
+  let uncovered = 0, flags = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (cells[r][c].revealed) uncovered++;
+      if (cells[r][c].element.textContent === "🚩") flags++;
+    }
+  }
+  tilesUncoveredDiv.textContent = "Tiles Uncovered: " + uncovered;
+  flagsPlacedDiv.textContent = "Flags Placed: " + flags;
+}
+
+function checkWin() {
+  let revealedCount = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (cells[r][c].revealed && !cells[r][c].mine) revealedCount++;
+    }
+  }
+  if (revealedCount === rows * cols - minesCount) {
+    gameOver = true;
+    stopTimer(); // <- pause timer on win
+    setTimeout(() => {
+      alert("You Win!");
+      incrementDifficultyStats(currentDifficulty, timer); // pass time to record fastest
+    }, 50);
+  }
+}
+
+// ---- Timer helpers ----
+function startTimer() {
+  stopTimer();
+  timerInterval = setInterval(() => {
+    timer++;
+    timerDiv.textContent = "Time: " + timer + "s";
+  }, 1000);
+}
+
+function stopTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+}
+
+// ---- Global stats display & persistence ----
+function updateGlobalDisplay() {
+  easyCountSpan.textContent  = globalData.easy.wins;
+  interCountSpan.textContent = globalData.intermediate.wins;
+  hardCountSpan.textContent  = globalData.hard.wins;
+
+  easyFastSpan.textContent  = (globalData.easy.fastest ?? "--");
+  intermediateFastSpan.textContent = (globalData.intermediate.fastest ?? "--");
+  hardFastSpan.textContent  = (globalData.hard.fastest ?? "--");
+}
+
+function incrementDifficultyStats(diff, timeTaken) {
+  const bucket = globalData[diff];
+  bucket.wins++;
+  if (bucket.fastest === null || timeTaken < bucket.fastest) {
+    bucket.fastest = timeTaken;
+  }
+  localStorage.setItem(STORAGE_KEY_NEW, JSON.stringify(globalData));
+  updateGlobalDisplay();
+}
+
+// auto-start a game
+startGame('easy');
+</script>
+</body>
+</html>
